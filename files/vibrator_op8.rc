@@ -1,0 +1,36 @@
+# OnePlus 8 vibrator HAL with amplitude control + haptic primitives (oneplus8-fixes/haptics-hal).
+# Installed as /system/etc/init/vibrator_op8.rc by apply.sh; undo with './apply.sh remove'.
+#
+# /system/etc/init is parsed before /vendor/etc/init, so this definition of
+# 'vendor.qti.vibrator' wins and the ROM's own one is ignored (init logs
+# "ignored duplicate definition"). The ROM's binary stays available as
+# 'vendor.qti.vibrator.stock' and is used:
+#   - automatically, if ours ever crashes or exits (it must not leave Android
+#     without a vibrator HAL: system_server waits for one at boot), and
+#   - on request: adb shell setprop persist.debug.vib.stock 1, then reboot
+#     (setprop persist.debug.vib.stock 0 + reboot to go back).
+service vendor.qti.vibrator /odm/bin/hw/android.hardware.vibrator-service.op8
+    class hal
+    user system
+    group system input
+    disabled
+
+service vendor.qti.vibrator.stock /vendor/bin/hw/vendor.qti.hardware.vibrator.service.oplus
+    class hal
+    user system
+    group system input
+    disabled
+
+on boot
+    setprop sys.vibrator.op8.mode ${persist.debug.vib.stock:-0}
+
+on property:sys.vibrator.op8.mode=0
+    start vendor.qti.vibrator
+
+on property:sys.vibrator.op8.mode=1
+    start vendor.qti.vibrator.stock
+
+on property:init.svc.vendor.qti.vibrator=restarting
+    stop vendor.qti.vibrator
+    setprop sys.vibrator.op8.mode fallback
+    start vendor.qti.vibrator.stock

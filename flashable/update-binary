@@ -1,0 +1,374 @@
+#!/sbin/sh
+# OnePlus 8 (crDroid 16) fixes, flashable from recovery. Installs exactly what
+# './apply.sh recovery' installs over adb, from the same files (see ../apply.sh):
+# the Dolby library, the JamesDSP effect + audio_effects.xml entry, the skin
+# thermal trip points and the haptics HAL, overlaid onto /odm from
+# /system/etc/odm_overlay at boot. App-side steps (JamesDSP app and its speaker
+# preset, slider haptics settings) can't be done from recovery; they stay in
+# './apply.sh postboot', and a ROM update keeps them anyway.
+#
+# Built into a zip by build.sh. MODE below is set to install or uninstall there.
+#
+# Safety: everything is first built, labelled and test-mounted in recovery's
+# /tmp (RAM). /system is only touched once that all checks out, and the result
+# is checked again on /system; if that fails the fix files are removed again.
+#
+# Dry run (writes nothing to the phone's storage), in recovery with ADB on:
+#   adb push oneplus8-fixes-<ver>.zip /tmp/op8.zip
+#   adb shell 'cd /tmp && unzip -o op8.zip META-INF/com/google/android/update-binary >/dev/null &&
+#              OP8_DRY_RUN=1 sh META-INF/com/google/android/update-binary 3 1 /tmp/op8.zip'
+# It builds and test-mounts everything in /tmp, then compares it with what's
+# installed and prints the differences.
+MODE=install
+
+OUTFD=$2
+ZIPFILE=$3
+DRY=${OP8_DRY_RUN:-0}
+R=${OP8_ROOT:-}       # fake root for flashable/test.sh on a PC; empty on the phone
+
+W=$R/tmp/op8-fixes                # unpacked zip, staging layer (recovery's /tmp is RAM)
+MNT=$R/tmp/op8-mnt                # partitions this script mounts itself
+MAPPER=$R/dev/block/mapper
+MOUNTS=$R/proc/mounts
+BL=$R/sys/class/backlight/panel0-backlight
+LEDS=$R/sys/class/leds/vibrator
+DIM_PID=$R/tmp/op8-dim.pid
+LOG=$R/tmp/op8-fixes.log
+
+VIB_BIN=android.hardware.vibrator-service.op8
+STOCK_VIB=bin/hw/vendor.qti.hardware.vibrator.service.oplus
+V33=libstagefright_foundation-v33.so
+JDSP_UUID=f27317f4-c984-4de6-9a90-545759495bf2
+DEVICES="OnePlus8 instantnoodle"
+
+ui_print() {
+    printf '%s\n' "$*" >> "$LOG"
+    case "$OUTFD" in
+        ''|*[!0-9]*|0|1|2) printf '%s\n' "$*" ;;
+        *) printf 'ui_print %s\nui_print\n' "$*" >> "/proc/self/fd/$OUTFD" ;;
+    esac
+}
+
+MOUNTED=""         # mount points this script mounted (unmounted again at the end)
+REMOUNT_RO=""      # /mnt/system was mounted read-only by recovery: put it back
+cleanup() {
+    [ -z "$REMOUNT_RO" ] || { sync; mount -o remount,ro "$REMOUNT_RO" 2>/dev/null; }
+    for m in $MOUNTED; do umount "$m" 2>/dev/null; rmdir "$m" 2>/dev/null; done
+    MOUNTED=""; REMOUNT_RO=""
+    rm -rf "$W"
+}
+abort() {
+    ui_print "ERROR: $*"
+    ui_print "Log: /tmp/op8-fixes.log"
+    cleanup
+    exit 1
+}
+
+label() { set -- $(ls -Zd "$1" 2>/dev/null); printf '%s' "${1:-?}"; }
+sum()   { set -- $(sha256sum "$1" 2>/dev/null); printf '%s' "${1:-?}"; }
+
+# Recovery resets the backlight on every touch; a small loop holds it at 2% until reboot.
+dim_screen() {
+    [ -w "$BL/brightness" ] || return 0
+    [ ! -f "$DIM_PID" ] || kill "$(cat "$DIM_PID")" 2>/dev/null
+    l=$(( ($(cat "$BL/max_brightness") * 2 + 50) / 100 )); [ "$l" -ge 1 ] || l=1
+    nohup sh -c "while :; do [ \"\$(cat $BL/brightness)\" = $l ] || echo $l > $BL/brightness; sleep 0.3; done" >/dev/null 2>&1 &
+    echo $! > "$DIM_PID"
+}
+
+# $1 = odm|vendor. Sets PART to a readable mount of it, or empty.
+part_dir() {
+    PART=""
+    if [ -d "$R/mnt/$1/etc" ]; then PART=$R/mnt/$1; return; fi
+    mkdir -p "$MNT/$1"
+    if mount -o ro "$MAPPER/$1$SLOT" "$MNT/$1" 2>>"$LOG"; then
+        MOUNTED="$MNT/$1 $MOUNTED"; PART=$MNT/$1
+    else
+        rmdir "$MNT/$1" 2>/dev/null
+    fi
+}
+
+# Sets SYS to the /system directory of this slot, writable unless dry run.
+mount_system() {
+    local root dev
+    if grep -q " $R/mnt/system " "$MOUNTS"; then
+        root=$R/mnt/system
+        if [ "$DRY" != 1 ]; then
+            dev=$(grep " $root " "$MOUNTS" | cut -d' ' -f1)
+            grep " $root " "$MOUNTS" | cut -d' ' -f4 | grep -q '^rw' || REMOUNT_RO=$root
+            blockdev --setrw "$dev" 2>>"$LOG"
+            mount -o remount,rw "$root" 2>>"$LOG" || abort "couldn't make system writable"
+        fi
+    else
+        root=$MNT/system
+        dev=$MAPPER/system$SLOT
+        [ -e "$dev" ] || abort "can't find $dev"
+        mkdir -p "$root"
+        if [ "$DRY" = 1 ]; then
+            mount -o ro "$dev" "$root" 2>>"$LOG" || abort "couldn't mount system"
+        else
+            blockdev --setrw "$dev" 2>>"$LOG"
+            mount -o rw "$dev" "$root" 2>>"$LOG" || abort "couldn't mount system writable"
+        fi
+        MOUNTED="$root $MOUNTED"
+    fi
+    if [ -f "$root/system/build.prop" ]; then SYS=$root/system
+    elif [ -f "$root/build.prop" ]; then SYS=$root
+    else abort "no build.prop in system"; fi
+    if [ "$DRY" != 1 ]; then
+        touch "$SYS/etc/.op8rw" 2>/dev/null && rm "$SYS/etc/.op8rw" || abort "system isn't writable"
+    fi
+    LAYER=$SYS/etc/odm_overlay
+    RC=$SYS/etc/init/odm_overlay.rc
+    VIB_RC=$SYS/etc/init/vibrator_op8.rc
+}
+
+# Same edit as apply.sh (python there): one line after <libraries> and one after <effects>.
+# Keeps every other byte, including a missing newline at the end. $1 = source, $2 = output.
+patch_effects_xml() {
+    local nl line out lib eff ta te ins_l ins_e
+    if grep -q 'libjamesdsp.so' "$1"; then cp "$1" "$2"; return 0; fi
+    [ "$(grep -o '<libraries>' "$1" | wc -l)" -eq 1 ] && [ "$(grep -o '<effects>' "$1" | wc -l)" -eq 1 ] || return 1
+    ta='<libraries>'; te='<effects>'
+    ins_l='
+        <library name="jdsp" path="libjamesdsp.so"/>'
+    ins_e="
+        <effect name=\"jamesdsp\" library=\"jdsp\" uuid=\"$JDSP_UUID\"/>"
+    lib=0; eff=0
+    while :; do
+        if IFS= read -r line; then nl=1; else [ -n "$line" ] || break; nl=0; fi
+        out=$line
+        if [ $lib = 0 ]; then case "$out" in *"$ta"*) out="${out%%"$ta"*}$ta$ins_l${out#*"$ta"}"; lib=1 ;; esac; fi
+        if [ $eff = 0 ]; then case "$out" in *"$te"*) out="${out%%"$te"*}$te$ins_e${out#*"$te"}"; eff=1 ;; esac; fi
+        printf '%s' "$out"
+        [ $nl = 0 ] || printf '\n'
+        [ $nl = 1 ] || break
+    done < "$1" > "$2"
+    [ $lib = 1 ] && [ $eff = 1 ] || return 1
+    [ "$(grep -c "$JDSP_UUID" "$2")" -eq 1 ] && [ "$(grep -c 'path="libjamesdsp.so"' "$2")" -eq 1 ] || return 1
+    [ $(( $(wc -l < "$1") + 2 )) -eq "$(wc -l < "$2")" ] || return 1
+}
+
+# Owners, modes and SELinux labels, same as apply.sh. $1 = layer, $2 = overlay rc, $3 = vibrator rc or ''.
+set_perms() {
+    chown -R root:root "$1" "$2" || return 1
+    find "$1" -type d -exec chmod 755 {} + || return 1
+    find "$1" -type f -exec chmod 644 {} + || return 1
+    chmod 644 "$2" || return 1
+    chcon -R u:object_r:vendor_file:s0 "$1" || return 1
+    [ ! -d "$1/etc" ] || chcon -R u:object_r:vendor_configs_file:s0 "$1/etc" || return 1
+    chcon u:object_r:system_file:s0 "$2" || return 1
+    t=$1/bin/thermal_tune.sh; [ ! -f "$t" ] || { chmod 755 "$t" && chcon u:object_r:vendor_thermal-engine_exec:s0 "$t"; } || return 1
+    v=$1/bin/hw/$VIB_BIN; [ ! -f "$v" ] || { chmod 755 "$v" && chcon u:object_r:hal_vibrator_default_exec:s0 "$v"; } || return 1
+    [ -z "$3" ] || { chown root:root "$3" && chmod 644 "$3" && chcon u:object_r:system_file:s0 "$3"; } || return 1
+}
+
+# The label every path should have. $1 = layer, $2 = path.
+want_label() {
+    case "$2" in
+        "$1/etc"|"$1/etc/"*)         echo u:object_r:vendor_configs_file:s0 ;;
+        "$1/bin/thermal_tune.sh")    echo u:object_r:vendor_thermal-engine_exec:s0 ;;
+        "$1/bin/hw/$VIB_BIN")        echo u:object_r:hal_vibrator_default_exec:s0 ;;
+        *)                           echo u:object_r:vendor_file:s0 ;;
+    esac
+}
+
+# Fails (and says what's wrong) unless every label and exec bit is right. Same args as set_perms.
+check_perms() {
+    local bad p
+    bad=""
+    for p in $(find "$1"); do
+        [ "$(label "$p")" = "$(want_label "$1" "$p")" ] || bad="$bad ${p#$1/}=$(label "$p")"
+    done
+    for p in "$2" $3; do
+        [ "$(label "$p")" = u:object_r:system_file:s0 ] || bad="$bad ${p##*/}=$(label "$p")"
+    done
+    for p in "$1/bin/thermal_tune.sh" "$1/bin/hw/$VIB_BIN"; do
+        [ ! -f "$p" ] || [ -x "$p" ] || bad="$bad ${p#$1/}=not-executable"
+    done
+    [ -z "$bad" ] && return 0
+    ui_print "Wrong labels/modes:$bad"
+    return 1
+}
+
+# Mounts layer $1 over this slot's /odm on a scratch dir, like the boot rc does, and checks it.
+test_mount() {
+    local m ok
+    m=$W/odm-test; mkdir -p "$m"
+    mount -t overlay overlay -o "ro,lowerdir=$1:$ODM,override_creds=off" "$m" 2>>"$LOG" || { rmdir "$m"; return 1; }
+    ok=1
+    [ "$(ls "$m" | wc -l)" -gt 0 ] || ok=0
+    [ ! -d "$1/etc" ] || [ "$(grep -c "$JDSP_UUID" "$m/etc/audio_effects.xml")" = 1 ] || ok=0
+    [ ! -f "$1/bin/thermal_tune.sh" ] || [ -x "$m/bin/thermal_tune.sh" ] || ok=0
+    [ ! -f "$1/bin/hw/$VIB_BIN" ] || { [ -x "$m/bin/hw/$VIB_BIN" ] && [ "$(label "$m/bin/hw/$VIB_BIN")" = u:object_r:hal_vibrator_default_exec:s0 ]; } || ok=0
+    umount "$m" 2>>"$LOG"; rmdir "$m" 2>/dev/null
+    [ $ok = 1 ]
+}
+
+# Dry run: staging vs what's on /system now (contents, labels, modes).
+compare_installed() {
+    local n p a b
+    n=0
+    for p in $( (cd "$W/layer" && find . | sort; [ ! -d "$LAYER" ] || (cd "$LAYER" && find . | sort)) | sort -u); do
+        [ "$p" != . ] || continue
+        a=$W/layer/${p#./}; b=$LAYER/${p#./}
+        if [ ! -e "$b" ]; then ui_print "  would add:    ${p#./}"; n=$((n+1)); continue; fi
+        if [ ! -e "$a" ]; then ui_print "  would remove: ${p#./}"; n=$((n+1)); continue; fi
+        [ ! -f "$a" ] || [ "$(sum "$a")" = "$(sum "$b")" ] || { ui_print "  would change: ${p#./}"; n=$((n+1)); }
+        [ "$(label "$a")" = "$(label "$b")" ] || { ui_print "  label differs: ${p#./} ($(label "$b") now)"; n=$((n+1)); }
+        [ "$(stat -c %a "$a")" = "$(stat -c %a "$b")" ] || { ui_print "  mode differs: ${p#./} ($(stat -c %a "$b") now)"; n=$((n+1)); }
+    done
+    for p in odm_overlay.rc vibrator_op8.rc; do
+        a=$W/$p; b=$SYS/etc/init/$p
+        if [ -f "$a" ] && [ ! -f "$b" ]; then ui_print "  would add:    init/$p"; n=$((n+1))
+        elif [ ! -f "$a" ] && [ -f "$b" ]; then ui_print "  would remove: init/$p"; n=$((n+1))
+        elif [ -f "$a" ]; then
+            [ "$(sum "$a")" = "$(sum "$b")" ] || { ui_print "  would change: init/$p"; n=$((n+1)); }
+            [ "$(label "$a")" = "$(label "$b")" ] || { ui_print "  label differs: init/$p"; n=$((n+1)); }
+        fi
+    done
+    [ ! -e "$SYS/etc/dolbyfix" ] && [ ! -e "$SYS/etc/init/dolbyfix.rc" ] || { ui_print "  would remove: old dolbyfix files"; n=$((n+1)); }
+    if [ $n = 0 ]; then ui_print "Identical to what's installed now."
+    else ui_print "$n difference(s) from what's installed now."; fi
+}
+
+# ---------------------------------------------------------------------------
+
+rm -f "$LOG"
+ui_print "OnePlus 8 fixes ($MODE)"
+[ "$DRY" != 1 ] || ui_print "DRY RUN: nothing will be written to the phone"
+dim_screen
+
+ok=""
+for p in ro.product.device ro.build.product ro.product.vendor.device; do
+    v=$(getprop $p)
+    for d in $DEVICES; do [ "$v" = "$d" ] && ok=y; done
+done
+[ -n "$ok" ] || abort "this zip is only for the OnePlus 8 (this is '$(getprop ro.product.device)')"
+SLOT=$(getprop ro.boot.slot_suffix)
+ui_print "crDroid $(getprop ro.crdroid.display.version), slot ${SLOT:-?}"
+
+rm -rf "$W"; mkdir -p "$W/zip" || abort "can't use /tmp"
+
+if [ "$MODE" = uninstall ]; then
+    mount_system
+    if [ "$DRY" = 1 ]; then
+        for p in "$LAYER" "$RC" "$VIB_RC" "$SYS/etc/dolbyfix" "$SYS/etc/init/dolbyfix.rc"; do
+            [ ! -e "$p" ] || ui_print "  would remove: ${p#$SYS/}"
+        done
+    else
+        rm -rf "$LAYER" "$RC" "$VIB_RC" "$SYS/etc/dolbyfix" "$SYS/etc/init/dolbyfix.rc"
+        [ ! -e "$LAYER" ] && [ ! -e "$RC" ] && [ ! -e "$VIB_RC" ] || abort "couldn't remove everything"
+        ui_print "Removed. After a reboot /odm and the vibrator"
+        ui_print "HAL are the ROM's own again."
+        ui_print "Slider haptics will buzz again on the ROM's"
+        ui_print "HAL: turn them off in crDroid's settings."
+        ui_print "The JamesDSP app and its settings stay."
+    fi
+    cleanup
+    exit 0
+fi
+
+# Unpack and check the payload.
+unzip -o "$ZIPFILE" -d "$W/zip" >>"$LOG" 2>&1 || abort "couldn't unpack the zip"
+P=$W/zip/files
+[ -f "$W/zip/SHA256SUMS" ] || abort "zip has no SHA256SUMS"
+if command -v sha256sum >/dev/null; then
+    while read -r s f; do
+        [ -n "$f" ] || continue
+        [ "$(sum "$W/zip/$f")" = "$s" ] || abort "damaged file in the zip: $f"
+    done < "$W/zip/SHA256SUMS"
+else
+    ui_print "No sha256sum here; relying on the zip's CRCs"
+fi
+
+mount_system
+part_dir odm; ODM=$PART
+[ -n "$ODM" ] || abort "couldn't mount the odm partition"
+part_dir vendor; VENDOR=$PART
+[ -n "$VENDOR" ] || ui_print "Couldn't mount vendor; assuming a 32-bit audio HAL"
+
+L=$W/layer
+mkdir -p "$L"
+
+# Dolby: only if the ROM still needs the library and still doesn't ship it.
+if [ -e "$ODM/lib64/$V33" ] || { [ -n "$VENDOR" ] && [ -e "$VENDOR/lib64/$V33" ]; }; then
+    ui_print "Dolby: ROM ships $V33 now, skipping"
+elif ! grep -q "$V33" "$ODM/lib64/libdlbdsservice_v3_6.so" 2>/dev/null; then
+    ui_print "Dolby: this ROM doesn't need it, skipping"
+else
+    mkdir -p "$L/lib64" && cp "$P/$V33" "$L/lib64/" || abort "copy failed"
+    ui_print "Dolby: adding $V33"
+fi
+
+# JamesDSP: the effect must match the audio HAL's bitness; the bundled build is 32-bit.
+bits=""
+if [ -n "$VENDOR" ] && [ -f "$VENDOR/bin/hw/android.hardware.audio.service" ]; then
+    bits=$(head -c 5 "$VENDOR/bin/hw/android.hardware.audio.service" | tail -c 1 | od -An -tu1 | tr -d ' \n')
+fi
+if [ "$bits" = 2 ]; then
+    ui_print "JamesDSP: audio HAL is 64-bit now; the bundled"
+    ui_print "effect is 32-bit. Skipping JamesDSP."
+elif [ ! -f "$ODM/etc/audio_effects.xml" ]; then
+    ui_print "JamesDSP: no /odm/etc/audio_effects.xml in this ROM. Skipping."
+else
+    [ "$bits" = 1 ] || ui_print "JamesDSP: couldn't tell the audio HAL's bitness; assuming 32-bit"
+    mkdir -p "$L/lib/soundfx" "$L/etc" && cp "$P/libjamesdsp.so" "$L/lib/soundfx/" || abort "copy failed"
+    patch_effects_xml "$ODM/etc/audio_effects.xml" "$L/etc/audio_effects.xml" \
+        || abort "JamesDSP: unexpected audio_effects.xml layout"
+    ui_print "JamesDSP: adding the effect + audio_effects.xml entry"
+fi
+
+# Thermals: run once at boot from the overlay, in thermal-engine's SELinux domain.
+mkdir -p "$L/bin" && cp "$P/thermal_tune.sh" "$L/bin/" || abort "copy failed"
+ui_print "Thermals: adding skin trip-point tuning"
+
+# Haptics: only for the vibrator stack it was written for (aw8697 + the oplus QTI HAL).
+haptics=""
+if [ -z "$VENDOR" ]; then
+    ui_print "Haptics: couldn't check the ROM's vibrator HAL. Skipping."
+elif [ ! -f "$VENDOR/$STOCK_VIB" ] || [ ! -e "$LEDS/waveform_index" ]; then
+    ui_print "Haptics: the ROM's vibrator HAL or driver changed. Skipping."
+else
+    mkdir -p "$L/bin/hw" && cp "$P/$VIB_BIN" "$L/bin/hw/" || abort "copy failed"
+    haptics=y
+    ui_print "Haptics: adding the vibrator HAL"
+fi
+
+# Stage the rc files next to the layer and give everything its final owners and labels.
+cp "$P/odm_overlay.rc" "$W/odm_overlay.rc" || abort "copy failed"
+svib=""
+[ -z "$haptics" ] || { cp "$P/vibrator_op8.rc" "$W/vibrator_op8.rc" || abort "copy failed"; svib=$W/vibrator_op8.rc; }
+set_perms "$L" "$W/odm_overlay.rc" "$svib" || abort "couldn't set owners/labels (in /tmp; system untouched)"
+check_perms "$L" "$W/odm_overlay.rc" "$svib" || abort "labels didn't stick (in /tmp; system untouched)"
+test_mount "$L" || abort "test mount failed (in /tmp; system untouched)"
+ui_print "Checked in /tmp: labels and test mount OK"
+
+if [ "$DRY" = 1 ]; then
+    compare_installed
+    cleanup
+    exit 0
+fi
+
+# Clear this and older versions of the fix, then write the new one.
+rm -rf "$LAYER" "$RC" "$VIB_RC" "$SYS/etc/dolbyfix" "$SYS/etc/init/dolbyfix.rc"
+cp -r "$L" "$LAYER" || { rm -rf "$LAYER"; abort "couldn't write to system"; }
+cp "$W/odm_overlay.rc" "$RC" || { rm -rf "$LAYER" "$RC"; abort "couldn't write to system"; }
+vib=""
+if [ -n "$haptics" ]; then
+    cp "$W/vibrator_op8.rc" "$VIB_RC" || { rm -rf "$LAYER" "$RC" "$VIB_RC"; abort "couldn't write to system"; }
+    vib=$VIB_RC
+fi
+if ! set_perms "$LAYER" "$RC" "$vib" || ! check_perms "$LAYER" "$RC" "$vib" || ! test_mount "$LAYER"; then
+    rm -rf "$LAYER" "$RC" "$VIB_RC"
+    abort "check on system failed; fix files removed again"
+fi
+sync
+ui_print "Written to system and test-mounted OK."
+ui_print "Reboot to use it."
+ui_print "After a clean flash, run './apply.sh postboot'"
+ui_print "from the PC for the JamesDSP app, its speaker"
+ui_print "preset and slider haptics. A ROM update"
+ui_print "keeps those."
+cleanup
+exit 0

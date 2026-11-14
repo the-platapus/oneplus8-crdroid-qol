@@ -1,0 +1,10 @@
+# Overlays /system/etc/odm_overlay onto /odm (erofs, read-only) at boot.
+# Written by oneplus8-fixes/apply.sh; undo with './apply.sh remove'.
+# override_creds=off: lower layers are accessed with the caller's credentials,
+# so SELinux sees exactly what it would without the overlay.
+on init
+    mount overlay overlay /odm ro lowerdir=/system/etc/odm_overlay:/odm,override_creds=off
+
+# Lower the skin throttling trip points (script comes from the same overlay).
+on property:sys.boot_completed=1
+    exec_background - root root -- /odm/bin/thermal_tune.sh
