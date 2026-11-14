@@ -7,7 +7,10 @@ Recovery-flashable versions of `../apply.sh recovery` and `../apply.sh remove`, 
 | `out/oneplus8-fixes-<date>.zip` | Installs the Dolby library, JamesDSP effect + `audio_effects.xml` entry, thermal trip points and haptics HAL. Same files, owners, modes and SELinux labels as `apply.sh`. |
 | `out/oneplus8-fixes-uninstall-<date>.zip` | Removes them, like `./apply.sh remove`. |
 
-`out/SHA256SUMS-<date>` holds the checksums of both zips.
+`out/SHA256SUMS-<date>` holds the checksums of both zips. Ready-made zips are on the
+[Releases](https://github.com/the-platapus/oneplus8-crdroid-qol/releases) page: CI builds, tests and publishes
+them for every `v<YYYYMMDD>` tag (`.github/workflows/flashable.yml`). Builds are reproducible: the same
+commit gives byte-identical zips.
 
 ## Flashing
 
@@ -78,7 +81,8 @@ installed now." Recovery's `/tmp` is RAM, so nothing persists.
 ```
 
 `build.sh` takes the files from `../files` (checked against `../files/SHA256SUMS`) and `update-binary`.
-`test.sh` runs the installer under dash and busybox sh against a fake recovery on the PC. The fake recovery
+`test.sh` runs the installer under mksh (Android's own shell), dash and busybox sh against a fake recovery
+on the PC. It skips any of those shells that isn't installed; CI runs all three. The fake recovery
 has fake partitions, plus stand-ins for mount, chcon, getprop and `ls -Z`. The tests cover these cases:
 
 - install, reflash and dry run

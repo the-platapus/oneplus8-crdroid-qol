@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Checksummed payloads and test fixtures: never touch line endings.
+files/** -text
+flashable/test/** -text
+
+# Run on Linux and on the phone: always LF.
+*.sh text eol=lf
+flashable/update-binary text eol=lf

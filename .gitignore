@@ -1,0 +1,4 @@
+# Build output: rebuilt by haptics-hal/build.sh and flashable/build.sh.
+# Flashable zips are published by CI as GitHub Releases (tag v<YYYYMMDD>).
+haptics-hal/out/
+flashable/out/

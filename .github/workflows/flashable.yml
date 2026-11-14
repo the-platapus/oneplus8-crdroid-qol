@@ -1,0 +1,94 @@
+# Builds the recovery-flashable zips, tests them against a fake recovery, and on a
+# v* tag (v20261114) publishes them as a GitHub Release.
+name: Flashable zips
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flashable-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    outputs:
+      ver: ${{ steps.ver.outputs.ver }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install test shells
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mksh busybox zip unzip >/dev/null
+
+      - name: Version
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then ver=${REF_NAME#v}
+          else ver=$(date -u +%Y%m%d)-${GITHUB_SHA::7}; fi
+          [[ "$ver" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad version '$ver'"; exit 1; }
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "Version: $ver"
+
+      - name: Build
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: flashable/build.sh
+
+      - name: Test against a fake recovery (mksh, dash, busybox sh)
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+          REQUIRE_SHELLS: '1'
+        run: flashable/test.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oneplus8-fixes-${{ steps.ver.outputs.ver }}
+          path: flashable/out/
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oneplus8-fixes-${{ needs.build.outputs.ver }}
+          path: flashable/out/
+
+      - name: Check the zips against their checksums
+        working-directory: flashable/out
+        env:
+          VER: ${{ needs.build.outputs.ver }}
+        run: sha256sum -c "SHA256SUMS-$VER"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.build.outputs.ver }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flashable/release-notes.sh "$VER" > notes.md
+          gh release create "$TAG" --verify-tag \
+            --title "OnePlus 8 fixes $VER" --notes-file notes.md \
+            "flashable/out/oneplus8-fixes-$VER.zip" \
+            "flashable/out/oneplus8-fixes-uninstall-$VER.zip" \
+            "flashable/out/SHA256SUMS-$VER"

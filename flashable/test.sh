@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Runs the zips' installer on this PC against a fake recovery, under dash and busybox sh
-# (Android's sh is mksh; these catch the same POSIX mistakes). Fake partitions live in a
-# temp dir; mount, umount, chcon, chown, blockdev, getprop and 'ls -Z' are stand-ins that
-# keep their state in files. Nothing here talks to a phone.
-#   ./build.sh && ./test.sh
+# Runs the zips' installer on this PC against a fake recovery, under mksh (Android's own
+# sh), dash and busybox sh. Fake partitions live in a temp dir; mount, umount, chcon, chown,
+# blockdev, getprop and 'ls -Z' are stand-ins that keep their state in files. Nothing here
+# talks to a phone.
+#   ./build.sh && ./test.sh          tests the newest zips in out/ (or VER=<ver> ./test.sh)
+# Shells that aren't installed are skipped, unless REQUIRE_SHELLS=1 (CI).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ZIP=$(ls "$HERE"/out/oneplus8-fixes-2*.zip | tail -1)
-UZIP=$(ls "$HERE"/out/oneplus8-fixes-uninstall-*.zip | tail -1)
+if [ -n "${VER:-}" ]; then
+    ZIP=$HERE/out/oneplus8-fixes-$VER.zip; UZIP=$HERE/out/oneplus8-fixes-uninstall-$VER.zip
+else
+    ZIP=$(ls -t "$HERE"/out/oneplus8-fixes-*.zip 2>/dev/null | grep -v -- -uninstall- | head -1)
+    UZIP=${ZIP/oneplus8-fixes-/oneplus8-fixes-uninstall-}
+fi
+[ -f "$ZIP" ] && [ -f "$UZIP" ] || { echo "no zips to test; run ./build.sh first" >&2; exit 1; }
+echo "testing $(basename "$ZIP") and $(basename "$UZIP")"
 FILES="$HERE/../files"
 FIX="$HERE/test"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -170,8 +177,14 @@ expected_install() {  # exactly what apply.sh writes: contents, modes, labels
     return $e
 }
 
-for name in dash "busybox sh"; do
+tested=0
+for name in mksh dash "busybox sh"; do
     read -r -a SHELLCMD <<<"$name"
+    if ! command -v "${SHELLCMD[0]}" >/dev/null; then
+        if [ "${REQUIRE_SHELLS:-0}" = 1 ]; then echo "== $name: not installed" >&2; exit 1; fi
+        echo "== $name: not installed, skipped"; continue
+    fi
+    tested=$((tested+1))
     echo "== $name"
 
     fresh
@@ -251,5 +264,5 @@ for name in dash "busybox sh"; do
 done
 
 echo
-echo "$pass passed, $fail failed"
-[ $fail = 0 ]
+echo "$pass passed, $fail failed ($tested shells)"
+[ $fail = 0 ] && [ $tested -gt 0 ]
