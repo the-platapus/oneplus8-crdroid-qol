@@ -1,0 +1,2 @@
+# Signed Android modules: never touch line endings.
+*.capex binary

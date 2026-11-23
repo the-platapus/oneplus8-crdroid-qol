@@ -1,0 +1,18 @@
+# Private signing keys: never commit them.
+keys/
+# Local tool paths, extracted ROM files and build output. Only the three modules are tracked.
+apex/*
+!apex/com.android.bt.capex
+out/*/*
+!out/*/com.android.bt.capex
+src/
+qemu/
+__pycache__/
+system.img
+syms.txt
+entry.S
+*.o
+*.elf
+*.bin
+harness
+libbluetooth_jni.so.patched
