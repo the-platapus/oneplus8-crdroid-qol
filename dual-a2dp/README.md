@@ -3,7 +3,7 @@
 Plays the phone's audio on **two Bluetooth headphones at once**. crDroid 16 can keep several headphones connected, but it only sends audio to the active one. This patch makes it send audio to every connected pair.
 
 > [!WARNING]
-> **Not tried on a phone yet.** The patch passes its tests in an ARM64 emulator, and both modules pass the checks Android runs on them at boot. Nothing has been installed on a real phone so far. Step 2 below installs crDroid's own module, only re-signed, to prove the install route before the patch goes on.
+> **The patched module hasn't been on a phone yet.** The install route has: the re-signed `unchanged` module (step 2) boots, and Android verifies and runs it. The patch passes its tests in an ARM64 emulator. Progress is in the [phone test log](#phone-test-log).
 
 It only works on the OnePlus 8 running crDroid `v12.9-20260424`. `btapex.sh` checks the phone's Bluetooth module first and refuses any other build.
 
@@ -36,6 +36,19 @@ If only the active pair plays, swap which pair is active. The copies are sized f
 | Undo everything | In recovery, run `./btapex.sh restore`, then turn A2DP offload back on |
 | Phone doesn't finish booting | In recovery, run `./btapex.sh restore` (recovery doesn't use this module) |
 | After a ROM update | The update puts crDroid's module back. A new crDroid build needs the patch redone, because the addresses change |
+
+## Phone test log
+
+OnePlus 8 (IN2015), crDroid `v12.9-20260424`, Galaxy Buds Core and JVC HA-Z55T.
+
+| Date | Step | Result |
+|---|---|---|
+| 2026-11-24 | Baseline | Original module (`com.android.bt` 361099999), A2DP offload on, both buds paired |
+| 2026-11-24 | `install unchanged` in recovery | ✅ Swap checked on the phone: right hash, `system_file` label and date kept, no leftover files, system read-only again |
+| 2026-11-24 | First boot on `unchanged` | ✅ Booted normally. `com.android.bt` was the only module unpacked again, so Android threw away crDroid's copy and verified ours against this project's key. PackageManager accepted the new signature, and Bluetooth started with no errors |
+| | Playback on one bud, `unchanged` | not checked yet |
+| | `install patched` | not done yet |
+| | Both buds playing | not done yet |
 
 ## How it works
 

@@ -90,10 +90,10 @@ cmd_status() {
     local cur name ver dual off
     cur=$(rsh "sha256sum /system/apex/com.android.bt.capex" | cut -d' ' -f1)
     name=$(known_name "$cur"); ver=$(rsh "pm list packages --apex-only --show-versioncode | grep com.android.bt")
-    dual=$(rsh "getprop debug.bt.dual_a2dp"); off=$(rsh "dumpsys bluetooth_manager | grep -m1 A2dpOffloadEnabled" | tr -d ' ')
+    dual=$(rsh "getprop debug.bt.dual_a2dp"); off=$(rsh "dumpsys bluetooth_manager | grep A2dpOffloadEnabled || true" | sed -n 1p | tr -d ' ')
     printf '  %-18s %s\n' "Module:" "${name:-UNKNOWN ($cur)}" "Package:" "${ver:-?}" \
         "A2DP offload:" "${off:-?}" "debug.bt.dual_a2dp:" "${dual:-unset (on)}"
-    rsh "dumpsys bluetooth_manager | sed -n '/^A2DP Peers State:/,/^A2DP Source State/p' | grep -E 'Peer:|State:|Streaming|Active'" | sed 's/^/    /' || true
+    rsh "dumpsys bluetooth_manager | sed -n '/^A2DP Peers State:/,/^A2DP Source State/p'" | sed 's/^/    /' || true
 }
 
 case "${1:-}" in
